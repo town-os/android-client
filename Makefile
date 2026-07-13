@@ -42,11 +42,24 @@ ifneq ($(EMU),)
 export RUST_LOG ?= info
 endif
 
+APP_ID           := com.townos.client
+
+# Prefer a NATIVE adb from the system (`android-tools`, installed by make deps)
+# and fall back to the SDK's only if there isn't one.
+#
+# The order matters on ARM: Google ships platform-tools for x86_64 Linux only, so
+# the SDK's adb is an x86_64 binary that would be dragged through FEX/muvm on
+# every invocation. adb runs a long-lived background server and talks to USB —
+# emulating it is both slow and needlessly fragile, and the distro's native adb
+# works perfectly. On x86_64 either one is fine.
+ADB              := $(shell command -v adb 2>/dev/null || echo $(ANDROID_SDK_ROOT)/platform-tools/adb)
+
 APK_DEBUG        := app/build/outputs/apk/debug/app-debug.apk
 APK_RELEASE      := app/build/outputs/apk/release/app-release-unsigned.apk
 
 .PHONY: help deps deps-debian sdk gradle build debug release lint test clean \
-        install uninstall logs check-java check-sdk check-gradle check-aapt2 x86-jdk
+        install uninstall logs devices check-java check-sdk check-gradle check-aapt2 \
+        check-device x86-jdk
 
 help:
 	@echo 'Town OS Android client — connect a phone to a Town OS network.'
@@ -67,10 +80,11 @@ help:
 	@echo '  lint          Run Android lint'
 	@echo '  test          Run unit tests (includes the DNS-routing tests)'
 	@echo
-	@echo 'Device:'
-	@echo '  install       adb install the debug APK'
-	@echo '  uninstall     adb uninstall the app'
+	@echo 'Device (needs a USB-connected phone with USB debugging on):'
+	@echo '  install       Build and install the debug APK on the phone'
+	@echo '  uninstall     Remove the app from the phone'
 	@echo '  logs          Tail logcat for this app only'
+	@echo '  devices       List attached devices'
 	@echo
 	@echo '  clean         Remove build output'
 	@echo
@@ -139,14 +153,36 @@ preflight: check-java check-gradle check-sdk check-aapt2
 clean:
 	@test -x $(GRADLE) && $(GRADLE) clean || rm -rf app/build build .gradle
 
-install: debug
-	adb install -r $(APK_DEBUG)
+# Install the debug APK on a USB-connected phone.
+#
+# The app opens a VpnService, so it cannot be exercised in any meaningful way
+# without a real device — there is no emulator path worth having here.
+#
+# Enable Developer options on the phone (tap Build number 7 times), then USB
+# debugging, then accept the "Allow USB debugging?" prompt when you plug in.
+install: debug check-device
+	$(ADB) install -r $(APK_DEBUG)
+	@echo
+	@echo "Installed. Open 'Town OS' on the phone."
+	@echo "Watch it with: make logs"
 
-uninstall:
-	adb uninstall com.townos.client || true
+uninstall: check-device
+	$(ADB) uninstall $(APP_ID) || true
 
-logs:
-	adb logcat --pid=$$(adb shell pidof -s com.townos.client)
+# Logcat scoped to this app only — an unfiltered logcat is unreadable.
+logs: check-device
+	@pid=$$($(ADB) shell pidof -s $(APP_ID) 2>/dev/null); \
+	if [ -z "$$pid" ]; then \
+	  echo "$(APP_ID) is not running — start it on the phone first." >&2; exit 1; \
+	fi; \
+	$(ADB) logcat --pid=$$pid
+
+# List attached devices, so "why won't it install" has an obvious first step.
+devices: check-device
+	@$(ADB) devices -l
+
+check-device:
+	@$(PWD)/make/check-adb.sh
 
 check-java:
 	@command -v java >/dev/null 2>&1 || { \

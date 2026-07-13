@@ -58,6 +58,30 @@ Two muvm quirks the Makefile handles, both of which look like something else:
 
 `make check-aapt2` verifies the whole chain and explains itself if it cannot.
 
+## Installing on a phone
+
+```bash
+make install    # builds the debug APK and adb-installs it
+make logs       # logcat, filtered to just this app
+make devices    # what adb can see
+make uninstall
+```
+
+On the phone: Settings → About → tap **Build number** seven times, then
+Developer options → **USB debugging**. Plug in over USB and accept the
+"Allow USB debugging?" prompt.
+
+There is no emulator path. The app opens a `VpnService` and its whole purpose is
+DNS behaviour on a real network, so an emulator would not tell you anything you
+want to know.
+
+**ARM hosts need a native `adb`.** Google ships platform-tools for x86_64 Linux
+only, so the SDK's `adb` is an x86_64 binary — and because binfmt hands it to
+FEX, it *appears* to work while actually running under emulation. adb starts a
+long-lived background server and talks to USB, so that is slow and fragile.
+`make deps` installs the distro's native adb (`android-tools`), and `make
+install` refuses to use the emulated one.
+
 ## What the app does
 
 1. **Log in** to a box (`POST /account/authenticate`, port 5309, plain HTTP).
