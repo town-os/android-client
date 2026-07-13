@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Town OS control API (:5309) is plain HTTP, so the app must be allowed to
+  speak cleartext to a box. We do NOT set cleartextTrafficPermitted globally:
+  it is scoped to the address ranges a box can actually live on — RFC1918 LAN,
+  the WireGuard overlay range Town OS derives its subnets from (10.64.0.0/10),
+  and localhost.
+
+  Package HTTPS (the :443 ingress) is a separate story and is NOT covered here:
+  those certs are issued by the box's own local CA, which no Android trust store
+  knows about. The app trusts that CA at the OkHttp layer instead — see
+  TownOsTrust.kt — because trusting it here would apply it to every connection
+  the app makes, not just ones to the box.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.0.0</domain>
+        <domain includeSubdomains="true">172.16.0.0</domain>
+        <domain includeSubdomains="true">192.168.0.0</domain>
+    </domain-config>
+
+    <!-- Boxes are addressed by IP or by a private TLD, neither of which the
+         domain-config matcher above can express exhaustively (the TLD is
+         operator-chosen). Permit cleartext by default for the base config and
+         rely on the app only ever dialing an operator-entered box address. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
