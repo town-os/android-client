@@ -143,7 +143,76 @@ class TunnelConfigBuilderTest {
         )
     }
 
+    // ---- clampToOverlay: town-os traffic only -------------------------------
+
+    private fun ifaceAddr(cidr: String = "10.90.12.7/32") = listOf(InetNetwork.parse(cidr))
+
+    @Test
+    fun `an overlay subnet is kept as-is`() {
+        val result = TunnelConfigBuilder.clampToOverlay(
+            listOf(InetNetwork.parse("10.90.12.0/24")),
+            ifaceAddr(),
+        )
+        assertEquals(listOf(InetNetwork.parse("10.90.12.0/24")), result)
+    }
+
+    @Test
+    fun `a default route is dropped and the overlay is synthesized from our address`() {
+        // The exact failure we are fixing: a stale full-tunnel enrollment. The
+        // box no longer sends 0.0.0.0/0, but a phone that enrolled before the fix
+        // still has it, and routing all traffic into a non-NATing tunnel takes the
+        // whole phone offline.
+        val result = TunnelConfigBuilder.clampToOverlay(
+            listOf(InetNetwork.parse("0.0.0.0/0")),
+            ifaceAddr(),
+        )
+        assertEquals(listOf(InetNetwork.parse("10.90.12.0/24")), result)
+        assertFalse(result.contains(InetNetwork.parse("0.0.0.0/0")))
+    }
+
+    @Test
+    fun `an overlay route survives alongside a default route`() {
+        val result = TunnelConfigBuilder.clampToOverlay(
+            listOf(InetNetwork.parse("10.90.12.0/24"), InetNetwork.parse("0.0.0.0/0")),
+            ifaceAddr(),
+        )
+        assertEquals(listOf(InetNetwork.parse("10.90.12.0/24")), result)
+    }
+
+    @Test
+    fun `a non-overlay route is dropped, not routed into the tunnel`() {
+        // A LAN or public prefix the box has no business routing for us: the
+        // phone reaches those on its own, never through the box.
+        val result = TunnelConfigBuilder.clampToOverlay(
+            listOf(InetNetwork.parse("192.168.1.0/24")),
+            ifaceAddr(),
+        )
+        assertEquals(listOf(InetNetwork.parse("10.90.12.0/24")), result)
+    }
+
+    @Test
+    fun `a route broader than the overlay range is rejected`() {
+        // 10.0.0.0/8 contains the overlay but also 10.0/10.1 — the ranges consumer
+        // routers hand out. A prefix shorter than the /10 gate is not town-os.
+        val result = TunnelConfigBuilder.clampToOverlay(
+            listOf(InetNetwork.parse("10.0.0.0/8")),
+            ifaceAddr(),
+        )
+        assertEquals(listOf(InetNetwork.parse("10.90.12.0/24")), result)
+    }
+
     // ---- build(): end to end ------------------------------------------------
+
+    @Test
+    fun `a full-tunnel config is clamped back to the overlay`() {
+        val config = TunnelConfigBuilder.build(
+            boxConfig(allowedIps = "0.0.0.0/0"),
+            privateKey = ourKey(),
+        )
+        val allowed = config.peers.first().allowedIps
+        assertFalse(allowed.contains(InetNetwork.parse("0.0.0.0/0")))
+        assertTrue(allowed.contains(InetNetwork.parse("10.90.12.0/24")))
+    }
 
     @Test
     fun `builds a usable config from the box's peer output`() {

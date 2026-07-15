@@ -6,6 +6,7 @@ import com.wireguard.config.Interface
 import com.wireguard.config.Peer
 import java.io.BufferedReader
 import java.io.StringReader
+import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -128,7 +129,11 @@ object TunnelConfigBuilder {
                 // (including DNS responses) stops arriving.
                 setPersistentKeepalive(peer.persistentKeepalive.orElse(25))
 
-                ensureDnsRouted(peer.allowedIps, dnsServers).forEach { addAllowedIp(it) }
+                // Route town-os traffic and nothing else. Clamp first so a stale
+                // full-tunnel enrollment cannot blackhole the phone, then layer
+                // the DNS host routes on top.
+                val overlay = clampToOverlay(peer.allowedIps, parsed.getInterface().addresses)
+                ensureDnsRouted(overlay, dnsServers).forEach { addAllowedIp(it) }
             }.build()
         }
 
@@ -181,6 +186,59 @@ object TunnelConfigBuilder {
         }
         return result
     }
+
+    /**
+     * The town-os overlay address space. Every network's overlay subnet is a /24
+     * drawn from here (wireguard/ipam.go, `SubnetForNetwork`). A route inside this
+     * range reaches town-os; anything else — above all a `0.0.0.0/0` default route
+     * left over from a full-tunnel enrollment — is the phone's own internet.
+     */
+    private val OVERLAY_V4: InetNetwork = InetNetwork.parse("10.64.0.0/10")
+
+    /** The /24 town-os carves overlay subnets into (wireguard/ipam.go). */
+    private const val OVERLAY_PREFIX = 24
+
+    /**
+     * Clamp the box's AllowedIPs to town-os traffic only.
+     *
+     * We route the overlay and nothing else: the phone reaches town-os services
+     * and rolodex through the tunnel, and every other destination takes the
+     * phone's normal internet path. So we keep only the box routes that fall
+     * inside the overlay range and drop the rest. This is the load-bearing part —
+     * a `0.0.0.0/0` from an old full-tunnel enrollment would otherwise pull *all*
+     * of the phone's traffic into the tunnel, where it dies: the box does not NAT
+     * the overlay out to the internet, so google and everything else go dark.
+     *
+     * If nothing survives (the box handed a bare default route with no overlay
+     * prefix), synthesize the /24 that contains our own interface address — that
+     * is the network we were enrolled onto, and it is what the box should have
+     * sent.
+     */
+    internal fun clampToOverlay(
+        allowedIps: Collection<InetNetwork>,
+        interfaceAddresses: Collection<InetNetwork>,
+    ): List<InetNetwork> {
+        val kept = allowedIps.filter { OVERLAY_V4.containsNetwork(it) }
+        if (kept.isNotEmpty()) return kept
+        return interfaceAddresses
+            .mapNotNull { it.address as? Inet4Address }
+            .map { containingSubnet(it, OVERLAY_PREFIX) }
+            .filter { OVERLAY_V4.containsNetwork(it) }
+            .distinct()
+    }
+
+    /** The [prefix]-length IPv4 network [ip] falls in, with host bits zeroed. */
+    private fun containingSubnet(ip: Inet4Address, prefix: Int): InetNetwork {
+        val bytes = ip.address
+        for (bit in prefix until 32) {
+            bytes[bit / 8] = (bytes[bit / 8].toInt() and (0x80 shr (bit % 8)).inv()).toByte()
+        }
+        return InetNetwork.parse("${InetAddress.getByAddress(bytes).hostAddress}/$prefix")
+    }
+
+    /** True when this network wholly contains [other] (a narrower-or-equal prefix). */
+    private fun InetNetwork.containsNetwork(other: InetNetwork): Boolean =
+        other.mask >= this.mask && this.contains(other.address)
 
     /** True when [network] covers [address]. */
     private fun InetNetwork.contains(address: InetAddress): Boolean {
