@@ -1,0 +1,79 @@
+# Build the Town OS Android client APKs on every push and pull request.
+#
+# Build-only: this is a fast "does it still compile and package?" check.
+# Releases (and their published APKs) are cut by pushing a version tag — see
+# release.yml.
+#
+# GitHub's ubuntu-latest runners are x86_64, so the whole toolchain runs
+# NATIVELY: aapt2 ships as an x86_64 binary, so none of the FEX/muvm emulation
+# the Makefile arranges for ARM hosts is needed here (make/emulation.sh prints
+# an empty prefix). That is why CI can just call the same `make` targets a
+# developer runs locally — one source of truth for how the app is built.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel an in-progress run when new commits land on the same ref, so a burst of
+# pushes doesn't queue up redundant builds.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Pin the SDK to the repo-local path the Makefile defaults to. Runners
+    # pre-export ANDROID_SDK_ROOT to a system path, and the Makefile's `?=`
+    # would defer to it — installing (and caching) the wrong directory.
+    env:
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/.android-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 17 to match the app's sourceCompatibility/jvmTarget.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          # Caches ~/.gradle (dependencies + wrapper dist) keyed on the build files.
+          cache: gradle
+
+      # The repo-local Android SDK (.android-sdk) is expensive to fetch, so cache
+      # it keyed on the Makefile — the pinned COMPILE_SDK/BUILD_TOOLS/CMDLINE_TOOLS
+      # live there, so bumping a version invalidates the cache automatically.
+      - name: Cache Android SDK
+        uses: actions/cache@v4
+        with:
+          path: .android-sdk
+          key: android-sdk-${{ runner.os }}-${{ hashFiles('Makefile', 'make/sdk.sh') }}
+
+      # Idempotent: installs the pinned platform + build-tools only if the cache
+      # missed. Writes local.properties so Gradle finds the SDK.
+      - name: Install Android SDK
+        run: make sdk
+
+      - name: Build debug APK
+        run: make debug
+
+      # Unsigned — a release keystore is not available to CI. Still useful as a
+      # proof the release/R8 shrink config builds; sign it out-of-band to install.
+      - name: Build release APK (unsigned)
+        run: make release
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload release APK (unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-unsigned
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
