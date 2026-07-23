@@ -7,6 +7,21 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// The version that ships is whatever tag was pushed: the release workflow passes
+// -PversionName=<tag>, and this literal is only the fallback for local builds.
+// Keeping one source of truth means a release can never be cut with a stale
+// version baked into it.
+val appVersionName = (findProperty("versionName") as String?) ?: "0.0.1"
+
+// versionCode must increase monotonically or Android refuses to install an
+// update over an existing install, so derive it from the semver rather than
+// hand-maintaining a counter that will inevitably drift. 1.2.3 -> 10203, which
+// leaves room for 100 minors and 100 patches per major.
+val appVersionCode = Regex("""^(\d+)\.(\d+)\.(\d+)""").find(appVersionName)
+    ?.destructured
+    ?.let { (major, minor, patch) -> major.toInt() * 10000 + minor.toInt() * 100 + patch.toInt() }
+    ?: 1
+
 android {
     namespace = "com.townos.client"
     compileSdk = 35
@@ -18,8 +33,8 @@ android {
         // when Android's Private DNS would bypass the box's resolver.
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
     }
 
     buildTypes {

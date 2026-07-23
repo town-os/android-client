@@ -27,6 +27,15 @@ export GRADLE_VERSION
 GRADLE           ?= $(PWD)/gradlew
 GRADLE_ARGS      := -p $(PWD)
 
+# Stamp the APK with an explicit version. The release workflow passes the pushed
+# tag here so the tag is what ships; left empty, build.gradle.kts falls back to
+# its own default. versionCode is derived from this, so don't pass anything that
+# isn't a semver.
+VERSION_NAME     ?=
+ifneq ($(VERSION_NAME),)
+GRADLE_ARGS      += -PversionName=$(VERSION_NAME)
+endif
+
 # Command prefix needed to run the build on this host. Empty on x86_64 and on a
 # 4K-page aarch64 kernel (where FEX handles aapt2 transparently via binfmt);
 # "muvm" on a 16K-page aarch64 kernel, where FEX can only run inside muvm's

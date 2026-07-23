@@ -1,6 +1,10 @@
 # Publish a GitHub Release with built APKs when a version tag is pushed.
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag 0.0.1 && git push origin 0.0.1        (a leading "v" works too)
+#
+# The tag IS the version: it is passed through to Gradle as versionName, and
+# versionCode is derived from it, so the APK can never disagree with the release
+# it is attached to.
 #
 # Signing is OPTIONAL and off by default. `make release` produces an *unsigned*
 # release APK, which cannot be installed on a phone as-is. If you add the four
@@ -17,7 +21,9 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Both spellings, so `0.0.1` and `v0.0.1` each cut a release. GitHub's tag
+    # filters are globs, not regexes — "[0-9]*" is the bare-semver form.
+    tags: ["v*", "[0-9]*"]
   # Allow cutting a release build by hand against the current ref, too.
   workflow_dispatch:
 
@@ -53,10 +59,36 @@ jobs:
       - name: Install Android SDK
         run: make sdk
 
+      # Resolve the release tag and the version stamped into the APK once, up
+      # front, so the build and the published release can't disagree. A pushed
+      # tag is authoritative; a manual run has no tag, so synthesize one.
+      - name: Resolve version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = tag ]; then
+            tag="$REF_NAME"
+            version="${tag#v}"
+            # versionCode is derived from the semver, so a malformed tag would
+            # silently ship as versionCode 1. Fail loudly instead.
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              echo "::error::tag '$tag' is not a semver; use 0.0.1 or v0.0.1" >&2
+              exit 1
+            fi
+          else
+            tag="manual-${{ github.run_number }}"
+            version="0.0.0"
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "Releasing $tag (versionName $version)"
+
       - name: Build debug and release APKs
         run: |
-          make debug
-          make release
+          make debug VERSION_NAME="$RELEASE_VERSION"
+          make release VERSION_NAME="$RELEASE_VERSION"
 
       # Zipalign + sign the unsigned release APK, but only when a keystore secret
       # is present. Uses the build-tools shipped by `make sdk` (pinned in the
@@ -83,18 +115,23 @@ jobs:
           "$build_tools/apksigner" verify --print-certs \
             app/build/outputs/apk/release/app-release.apk
 
-      # Collect whatever we produced under a flat dist/ dir with clear names.
+      # Collect whatever we produced under a flat dist/ dir, named for the
+      # version so a downloaded APK is self-identifying.
       - name: Stage release assets
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/app-debug.apk"
+          base="town-os-client-$RELEASE_VERSION"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/$base-debug.apk"
           if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk "dist/app-release.apk"
+            cp app/build/outputs/apk/release/app-release.apk "dist/$base.apk"
           else
             cp app/build/outputs/apk/release/app-release-unsigned.apk \
-               "dist/app-release-unsigned.apk"
+               "dist/$base-unsigned.apk"
           fi
+          # A release with no APK attached is a broken release; catch it here
+          # rather than shipping an empty one.
+          test -n "$(ls -A dist)"
           ls -la dist
 
       # Create the Release from the tag (or a lightweight one for manual runs)
@@ -102,17 +139,32 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tag="$REF_NAME"
-          # workflow_dispatch runs on a branch, not a tag; synthesize one so the
-          # release has something to hang off of.
-          case "${{ github.ref_type }}" in
-            tag) ;;
-            *) tag="manual-${{ github.run_number }}"; git tag "$tag"; git push origin "$tag" ;;
-          esac
-          gh release create "$tag" \
-            --title "$tag" \
-            --generate-notes \
-            dist/*
+          # workflow_dispatch runs on a branch, not a tag; push the synthesized
+          # one so the release has something to hang off of.
+          if [ "${{ github.ref_type }}" != tag ]; then
+            git tag "$RELEASE_TAG"
+            git push origin "$RELEASE_TAG"
+          fi
+          # Say plainly whether the APK can actually be installed, so nobody
+          # downloads an unsigned build and wonders why the install fails.
+          if [ -n "$KEYSTORE_B64" ]; then
+            note="The release APK is signed and installable."
+          else
+            note="No signing keystore is configured for this repository, so the
+          release APK is **unsigned** and cannot be installed as-is — sign it
+          yourself, or install the debug APK. See .github/workflows/release.yml
+          for the secrets that enable signing."
+          fi
+          # --clobber so re-running against an existing tag replaces the assets
+          # instead of failing halfway through the upload.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --notes "$note" \
+              --generate-notes \
+              dist/*
+          fi
