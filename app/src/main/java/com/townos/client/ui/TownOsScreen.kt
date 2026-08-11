@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -46,6 +47,19 @@ fun TownOsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            // The window is edge-to-edge (Android 15 forces it at targetSdk 35),
+            // so `adjustResize` no longer shrinks it for the keyboard — the IME
+            // arrives as an inset that something has to consume, or it simply
+            // paints over the bottom of the screen. safeDrawing covers the system
+            // bars, the cutout, AND the IME.
+            //
+            // Order matters: this sits BEFORE verticalScroll so it shrinks the
+            // scroll *viewport*. Below verticalScroll it would only pad the
+            // content, leaving the viewport full-height and the fields under the
+            // keyboard still unreachable. Shrinking the viewport is what gives the
+            // scroll the extra range — and what lets a focused field scroll itself
+            // back into view.
+            .safeDrawingPadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),

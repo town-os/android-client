@@ -24,6 +24,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.TownOs">
 
+        <!-- adjustResize, not adjustPan. The window is edge-to-edge, so this no
+             longer resizes anything by itself — the screen consumes the IME inset
+             instead (see TownOsScreen). But it is still what makes the framework
+             report that inset at all below API 30, and adjustPan would fight the
+             inset handling by sliding the whole window instead. -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
