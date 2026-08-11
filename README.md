@@ -11,11 +11,17 @@ that actually takes care — makes the box's DNS work once it is connected.
 make deps      # host packages, Gradle, and the Android SDK (all repo-local)
 make debug     # build the APK
 make install   # adb install to a connected device
+make run       # or: build, boot an emulator, and launch (UI work only)
 ```
 
 `make deps` is idempotent and installs everything into the checkout
-(`.android-sdk/`, `.gradle-dist/`) rather than a system path, so two checkouts
-never fight over one SDK. It works on Arch, Fedora, and Debian/Ubuntu.
+(`.android-sdk/`, `.gradle-dist/`, `.android-avd/`) rather than a system path, so
+two checkouts never fight over one SDK. It works on Arch, Fedora, and
+Debian/Ubuntu.
+
+The emulator is the last and by far the largest step — several GB of emulator and
+system image — so if you only need to build, `make sdk` gets you there. On a
+non-x86_64 host it skips itself rather than failing.
 
 `make help` lists every target. `make test` runs lint first and stops on the
 first failure — there is no point testing code that does not lint.
@@ -71,16 +77,96 @@ On the phone: Settings → About → tap **Build number** seven times, then
 Developer options → **USB debugging**. Plug in over USB and accept the
 "Allow USB debugging?" prompt.
 
-There is no emulator path. The app opens a `VpnService` and its whole purpose is
-DNS behaviour on a real network, so an emulator would not tell you anything you
-want to know.
-
 **ARM hosts need a native `adb`.** Google ships platform-tools for x86_64 Linux
 only, so the SDK's `adb` is an x86_64 binary — and because binfmt hands it to
 FEX, it *appears* to work while actually running under emulation. adb starts a
 long-lived background server and talks to USB, so that is slow and fragile.
 `make deps` installs the distro's native adb (`android-tools`), and `make
 install` refuses to use the emulated one.
+
+## Running in an emulator
+
+```bash
+make run             # build, boot, install, launch
+make stop            # shut the emulator down
+make emulator-logs   # logcat, filtered to just this app
+make browse          # open a Town OS name in the emulator's browser
+make emulator-deps   # only if you skipped it / want to rebuild the AVD
+```
+
+`make browse` takes `URL=` and defaults to `http://gitea.default.home` — a
+package FQDN rather than a public site, because a public site loading proves only
+that the guest has internet. It is the end-to-end check that a Town OS name
+resolves *through the tunnel*, which is the one thing logcat cannot show you. It
+will not boot an emulator for you; it expects one already running.
+
+Two things that will fool you here. The AOSP (`default`) system image ships **no
+browser** — `make browse` says so and tells you how to switch to a Google APIs
+image if you hit it. And Chrome's own **Secure DNS (DoH)** bypasses the system
+resolver entirely, which looks exactly like the box's resolver failing; check
+`chrome://settings/security` before suspecting the tunnel.
+
+`make deps` already installed this. Its last step, `emulator-deps`, installs the
+host libraries on **Arch** and **Debian/Ubuntu**, pulls the SDK's `emulator`
+package and an API-35 system image, and creates the AVD. It also adds you to the
+`kvm` group if you are not in it — log out and back in afterwards, or the
+emulator falls back to software emulation and is unusably slow. Like everything
+else here the AVD is repo-local (`.android-avd/`), so checkouts do not share one.
+
+`make run` is idempotent about the emulator: it boots one only if none is
+running, so you can rebuild and relaunch all day without accumulating VMs.
+`make stop` saves a quick-boot snapshot on the way out, so the next start is far
+faster than the first cold one.
+
+### It reaches the box through NAT
+
+The emulator does **not** bridge onto your LAN. The guest sits on `10.0.2.0/24`
+behind a virtual router, and QEMU's user-mode (slirp) stack is a *userspace* TCP
+stack: when the guest connects to `192.168.122.50:5309`, the emulator opens an
+ordinary socket on the host and shuttles bytes. The rule is simply **whatever the
+host can reach, the guest can reach** — and the box sees the host's IP, not the
+guest's.
+
+| Address | What it is |
+| --- | --- |
+| `10.0.2.1` | the virtual router |
+| `10.0.2.2` | alias to the host's loopback (`127.0.0.1`) |
+| `10.0.2.3` | the host's first DNS server |
+| `10.0.2.15` | the guest's own interface |
+
+So the tunnel really does work here. Login and enrollment are plain TCP; the
+WireGuard handshake is outbound UDP, NATed the same way, with the guest
+initiating so the return path matches the mapping (`PersistentKeepalive = 25`
+keeps it warm). DNS queries go into the tun and reach rolodex carrying the
+**overlay source address**, which is the property the entire split-horizon design
+depends on — so it is genuinely exercised, not faked.
+
+`clampToOverlay` is quietly load-bearing: `10.64.0.0/10` does not collide with
+the emulator's `10.0.2.0/24`, and clamping away a stale `0.0.0.0/0` stops the
+tunnel from swallowing the guest's own route out. A full-tunnel enrollment breaks
+the emulator exactly the way it would blackhole a phone.
+
+Two things that do not survive the NAT: **inbound** connections need `adb
+forward`, and **ICMP** does not work — a failed `ping` from the emulator is not
+evidence of anything, so test with TCP.
+
+What still wants a real phone is the mobile conditions, not the tunnel: Wi-Fi ↔
+cellular handoff, doze and background restrictions, always-on VPN, and battery
+behaviour. Private DNS *is* testable, since you can set it in the emulator's
+settings — useful, given it is the app's most confusing failure mode.
+
+Two more things worth knowing:
+
+- **The AVD sets `hw.keyboard=no` on purpose.** Android hides the on-screen IME
+  whenever a hardware keyboard is present, and the emulator counts your host
+  keyboard as one — which would make it impossible to check the very thing you
+  booted it for. The cost is that host typing does not work; use the on-screen
+  keyboard or `adb -e shell input text 'hello'`. Set `AVD_HW_KEYBOARD=yes` to
+  swap the trade.
+- **x86_64 Linux only.** Google publishes no linux-aarch64 emulator, and unlike
+  `aapt2` this cannot be fixed with FEX — the emulator needs the host's KVM, and
+  an emulated x86_64 process cannot reach an aarch64 host's. Building on ARM is
+  fine; emulating on it is not.
 
 ## What the app does
 
